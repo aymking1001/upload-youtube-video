@@ -1,0 +1,791 @@
+name: Upload Video to YouTube
+
+on:
+  workflow_dispatch:
+    inputs:
+
+      # =========================
+      # Google Drive OAuth
+      # =========================
+      google_client_id:
+        description: "Google Drive Client ID"
+        required: true
+        type: string
+
+      google_client_secret:
+        description: "Google Drive Client Secret"
+        required: true
+        type: string
+
+      google_refresh_token:
+        description: "Google Drive Refresh Token"
+        required: true
+        type: string
+
+      # =========================
+      # YouTube OAuth
+      # =========================
+      youtube_client_id:
+        description: "YouTube Client ID"
+        required: true
+        type: string
+
+      youtube_client_secret:
+        description: "YouTube Client Secret"
+        required: true
+        type: string
+
+      youtube_refresh_token:
+        description: "YouTube Refresh Token"
+        required: true
+        type: string
+
+      # =========================
+      # Video
+      # =========================
+      video_file_id:
+        description: "Google Drive Video File ID"
+        required: true
+        type: string
+
+      # =========================
+      # YouTube metadata
+      # =========================
+      title:
+        description: "YouTube Video Title"
+        required: true
+        type: string
+
+      description:
+        description: "YouTube Video Description"
+        required: false
+        type: string
+
+      privacy_status:
+        description: "YouTube Privacy Status"
+        required: true
+        type: string
+
+      category_id:
+        description: "YouTube Category ID"
+        required: true
+        type: string
+
+      playlist_name:
+        description: "Playlist Name"
+        required: false
+        type: string
+
+      # =========================
+      # n8n callback
+      # =========================
+      callback_url:
+        description: "n8n callback URL"
+        required: false
+        type: string
+
+
+jobs:
+
+  upload:
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 120
+
+    steps:
+
+      # ==========================================
+      # 1. Checkout
+      # ==========================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # ==========================================
+      # 2. Setup Python
+      # ==========================================
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+
+      # ==========================================
+      # 3. Install dependencies
+      # ==========================================
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+
+          pip install \
+            google-auth \
+            google-auth-oauthlib \
+            google-auth-httplib2 \
+            google-api-python-client \
+            requests
+
+
+      # ==========================================
+      # 4. Mask sensitive values
+      # ==========================================
+      - name: Mask credentials
+        env:
+          GOOGLE_CLIENT_ID: ${{ inputs.google_client_id }}
+          GOOGLE_CLIENT_SECRET: ${{ inputs.google_client_secret }}
+          GOOGLE_REFRESH_TOKEN: ${{ inputs.google_refresh_token }}
+
+          YOUTUBE_CLIENT_ID: ${{ inputs.youtube_client_id }}
+          YOUTUBE_CLIENT_SECRET: ${{ inputs.youtube_client_secret }}
+          YOUTUBE_REFRESH_TOKEN: ${{ inputs.youtube_refresh_token }}
+
+        run: |
+          echo "::add-mask::$GOOGLE_CLIENT_ID"
+          echo "::add-mask::$GOOGLE_CLIENT_SECRET"
+          echo "::add-mask::$GOOGLE_REFRESH_TOKEN"
+
+          echo "::add-mask::$YOUTUBE_CLIENT_ID"
+          echo "::add-mask::$YOUTUBE_CLIENT_SECRET"
+          echo "::add-mask::$YOUTUBE_REFRESH_TOKEN"
+
+
+      # ==========================================
+      # 5. Download from Google Drive
+      # ==========================================
+      - name: Download video from Google Drive
+        env:
+          GOOGLE_CLIENT_ID: ${{ inputs.google_client_id }}
+          GOOGLE_CLIENT_SECRET: ${{ inputs.google_client_secret }}
+          GOOGLE_REFRESH_TOKEN: ${{ inputs.google_refresh_token }}
+          VIDEO_FILE_ID: ${{ inputs.video_file_id }}
+
+        run: |
+
+          python <<'PY'
+
+          import os
+          import sys
+
+          from google.oauth2.credentials import Credentials
+          from google.auth.transport.requests import Request
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaIoBaseDownload
+
+
+          CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
+          CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
+          REFRESH_TOKEN = os.environ["GOOGLE_REFRESH_TOKEN"]
+          FILE_ID = os.environ["VIDEO_FILE_ID"]
+
+          OUTPUT_FILE = "video.mp4"
+
+
+          print("Creating Google Drive credentials...")
+
+          credentials = Credentials(
+              token=None,
+              refresh_token=REFRESH_TOKEN,
+              token_uri="https://oauth2.googleapis.com/token",
+              client_id=CLIENT_ID,
+              client_secret=CLIENT_SECRET,
+              scopes=[
+                  "https://www.googleapis.com/auth/drive.readonly"
+              ]
+          )
+
+
+          print("Refreshing Google Drive access token...")
+
+          credentials.refresh(Request())
+
+
+          print("Connecting to Google Drive...")
+
+          service = build(
+              "drive",
+              "v3",
+              credentials=credentials,
+              cache_discovery=False
+          )
+
+
+          print("Getting file information...")
+
+          file_info = service.files().get(
+              fileId=FILE_ID,
+              fields="id,name,size,mimeType"
+          ).execute()
+
+
+          file_name = file_info.get("name", "video.mp4")
+          file_size = file_info.get("size")
+
+          print(f"File: {file_name}")
+
+          if file_size:
+              print(f"File size: {int(file_size) / 1024 / 1024:.2f} MB")
+
+
+          print("Starting Google Drive download...")
+
+
+          request = service.files().get_media(
+              fileId=FILE_ID
+          )
+
+
+          with open(OUTPUT_FILE, "wb") as fh:
+
+              downloader = MediaIoBaseDownload(
+                  fh,
+                  request,
+                  chunksize=8 * 1024 * 1024
+              )
+
+              done = False
+
+              while not done:
+
+                  status, done = downloader.next_chunk()
+
+                  if status:
+
+                      progress = int(
+                          status.progress() * 100
+                      )
+
+                      print(
+                          f"Download progress: {progress}%"
+                      )
+
+
+          actual_size = os.path.getsize(OUTPUT_FILE)
+
+          print(
+              f"Download complete: "
+              f"{actual_size / 1024 / 1024:.2f} MB"
+          )
+
+          if actual_size == 0:
+
+              print("ERROR: downloaded file is empty")
+
+              sys.exit(1)
+
+          PY
+
+
+      # ==========================================
+      # 6. Upload to YouTube
+      # ==========================================
+      - name: Upload video to YouTube
+        env:
+          YOUTUBE_CLIENT_ID: ${{ inputs.youtube_client_id }}
+          YOUTUBE_CLIENT_SECRET: ${{ inputs.youtube_client_secret }}
+          YOUTUBE_REFRESH_TOKEN: ${{ inputs.youtube_refresh_token }}
+
+          VIDEO_TITLE: ${{ inputs.title }}
+          VIDEO_DESCRIPTION: ${{ inputs.description }}
+          PRIVACY_STATUS: ${{ inputs.privacy_status }}
+          CATEGORY_ID: ${{ inputs.category_id }}
+
+        run: |
+
+          python <<'PY'
+
+          import os
+          import sys
+          import time
+          import json
+
+          import requests
+
+          from google.oauth2.credentials import Credentials
+          from google.auth.transport.requests import Request
+
+
+          CLIENT_ID = os.environ["YOUTUBE_CLIENT_ID"]
+          CLIENT_SECRET = os.environ["YOUTUBE_CLIENT_SECRET"]
+          REFRESH_TOKEN = os.environ["YOUTUBE_REFRESH_TOKEN"]
+
+          TITLE = os.environ["VIDEO_TITLE"]
+          DESCRIPTION = os.environ.get(
+              "VIDEO_DESCRIPTION",
+              ""
+          )
+
+          PRIVACY_STATUS = os.environ.get(
+              "PRIVACY_STATUS",
+              "private"
+          )
+
+          CATEGORY_ID = os.environ.get(
+              "CATEGORY_ID",
+              "25"
+          )
+
+          VIDEO_FILE = "video.mp4"
+
+
+          # ==========================================
+          # OAuth
+          # ==========================================
+
+          print("Creating YouTube credentials...")
+
+
+          credentials = Credentials(
+              token=None,
+              refresh_token=REFRESH_TOKEN,
+              token_uri="https://oauth2.googleapis.com/token",
+              client_id=CLIENT_ID,
+              client_secret=CLIENT_SECRET,
+              scopes=[
+                  "https://www.googleapis.com/auth/youtube.upload"
+              ]
+          )
+
+
+          print("Refreshing YouTube access token...")
+
+          credentials.refresh(Request())
+
+          ACCESS_TOKEN = credentials.token
+
+
+          # ==========================================
+          # File information
+          # ==========================================
+
+          file_size = os.path.getsize(
+              VIDEO_FILE
+          )
+
+          print(
+              f"Video size: "
+              f"{file_size / 1024 / 1024:.2f} MB"
+          )
+
+
+          # ==========================================
+          # YouTube metadata
+          # ==========================================
+
+          metadata = {
+
+              "snippet": {
+
+                  "title": TITLE,
+
+                  "description": DESCRIPTION,
+
+                  "categoryId": CATEGORY_ID
+              },
+
+              "status": {
+
+                  "privacyStatus": PRIVACY_STATUS,
+
+                  "selfDeclaredMadeForKids": False
+              }
+          }
+
+
+          # ==========================================
+          # Start resumable upload
+          # ==========================================
+
+          upload_url = (
+              "https://www.googleapis.com/"
+              "upload/youtube/v3/videos"
+              "?part=snippet,status"
+              "&uploadType=resumable"
+          )
+
+
+          headers = {
+
+              "Authorization":
+                  f"Bearer {ACCESS_TOKEN}",
+
+              "Content-Type":
+                  "application/json; charset=UTF-8",
+
+              "X-Upload-Content-Length":
+                  str(file_size),
+
+              "X-Upload-Content-Type":
+                  "video/mp4"
+          }
+
+
+          print("Starting YouTube resumable upload...")
+
+
+          response = requests.post(
+              upload_url,
+              headers=headers,
+              json=metadata,
+              timeout=60
+          )
+
+
+          if response.status_code not in [200, 201]:
+
+              print(
+                  "Failed to initialize YouTube upload."
+              )
+
+              print(
+                  f"HTTP {response.status_code}"
+              )
+
+              print(response.text)
+
+              sys.exit(1)
+
+
+          location = response.headers.get(
+              "Location"
+          )
+
+
+          if not location:
+
+              print(
+                  "ERROR: YouTube did not return "
+                  "an upload URL."
+              )
+
+              sys.exit(1)
+
+
+          print(
+              "YouTube resumable upload initialized."
+          )
+
+
+          # ==========================================
+          # Upload video in chunks
+          # ==========================================
+
+          CHUNK_SIZE = 8 * 1024 * 1024
+
+          uploaded = 0
+
+          video_id = None
+
+
+          with open(
+              VIDEO_FILE,
+              "rb"
+          ) as video:
+
+              while uploaded < file_size:
+
+                  chunk = video.read(
+                      CHUNK_SIZE
+                  )
+
+                  if not chunk:
+                      break
+
+
+                  chunk_start = uploaded
+
+                  chunk_end = (
+                      uploaded
+                      + len(chunk)
+                      - 1
+                  )
+
+
+                  chunk_headers = {
+
+                      "Authorization":
+                          f"Bearer {ACCESS_TOKEN}",
+
+                      "Content-Length":
+                          str(len(chunk)),
+
+                      "Content-Range":
+                          f"bytes {chunk_start}-{chunk_end}/{file_size}",
+
+                      "Content-Type":
+                          "video/mp4"
+                  }
+
+
+                  while True:
+
+                      try:
+
+                          upload_response = requests.put(
+
+                              location,
+
+                              headers=chunk_headers,
+
+                              data=chunk,
+
+                              timeout=300
+                          )
+
+                      except requests.RequestException as error:
+
+                          print(
+                              f"Network error: {error}"
+                          )
+
+                          print(
+                              "Retrying..."
+                          )
+
+                          time.sleep(5)
+
+                          continue
+
+
+                      if upload_response.status_code in [
+                          200,
+                          201
+                      ]:
+
+                          result = (
+                              upload_response.json()
+                          )
+
+                          video_id = result.get(
+                              "id"
+                          )
+
+                          uploaded = file_size
+
+                          print(
+                              "YouTube upload completed."
+                          )
+
+                          break
+
+
+                      elif upload_response.status_code == 308:
+
+                          range_header = (
+                              upload_response
+                              .headers
+                              .get("Range")
+                          )
+
+
+                          if range_header:
+
+                              uploaded = int(
+                                  range_header
+                                  .split("-")[1]
+                              ) + 1
+
+                          else:
+
+                              uploaded = (
+                                  chunk_end + 1
+                              )
+
+
+                          print(
+                              f"Upload progress: "
+                              f"{uploaded / file_size * 100:.2f}%"
+                          )
+
+                          break
+
+
+                      elif upload_response.status_code in [
+                          429,
+                          500,
+                          502,
+                          503,
+                          504
+                      ]:
+
+                          print(
+                              f"YouTube returned "
+                              f"{upload_response.status_code}"
+                          )
+
+                          print(
+                              "Retrying chunk..."
+                          )
+
+                          time.sleep(5)
+
+                          continue
+
+
+                      else:
+
+                          print(
+                              "YouTube upload failed."
+                          )
+
+                          print(
+                              f"HTTP "
+                              f"{upload_response.status_code}"
+                          )
+
+                          print(
+                              upload_response.text
+                          )
+
+                          sys.exit(1)
+
+
+          # ==========================================
+          # Verify result
+          # ==========================================
+
+          if not video_id:
+
+              print(
+                  "ERROR: YouTube upload finished "
+                  "without video ID."
+              )
+
+              sys.exit(1)
+
+
+          video_url = (
+              "https://www.youtube.com/watch?v="
+              + video_id
+          )
+
+
+          print("")
+          print("==============================")
+          print("UPLOAD SUCCESS")
+          print("==============================")
+          print(f"VIDEO_ID={video_id}")
+          print(f"VIDEO_URL={video_url}")
+          print("==============================")
+
+
+          # Save result for next GitHub steps
+
+          with open(
+              os.environ["GITHUB_OUTPUT"],
+              "a"
+          ) as output:
+
+              output.write(
+                  f"video_id={video_id}\n"
+              )
+
+              output.write(
+                  f"video_url={video_url}\n"
+              )
+
+          PY
+
+
+      # ==========================================
+      # 7. Callback to n8n
+      # ==========================================
+      - name: Send result to n8n
+        if: ${{ inputs.callback_url != '' }}
+
+        env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
+
+        run: |
+
+          python <<'PY'
+
+          import os
+          import json
+          import requests
+
+
+          callback_url = os.environ.get(
+              "CALLBACK_URL"
+          )
+
+
+          if not callback_url:
+
+              print(
+                  "No callback URL supplied."
+              )
+
+              exit(0)
+
+
+          # Read GitHub output from previous step
+          # through environment file is not directly
+          # available here, so get the video ID
+          # from the workflow environment.
+
+
+          video_id = os.environ.get(
+              "VIDEO_ID"
+          )
+
+
+          if not video_id:
+
+              print(
+                  "VIDEO_ID is not available."
+              )
+
+              print(
+                  "Callback skipped."
+              )
+
+              exit(0)
+
+
+          payload = {
+
+              "success": True,
+
+              "videoId": video_id,
+
+              "videoUrl":
+                  "https://www.youtube.com/watch?v="
+                  + video_id,
+
+              "title":
+                  os.environ.get(
+                      "VIDEO_TITLE",
+                      ""
+                  ),
+
+              "playlistName":
+                  os.environ.get(
+                      "PLAYLIST_NAME",
+                      ""
+                  )
+          }
+
+
+          response = requests.post(
+
+              callback_url,
+
+              json=payload,
+
+              timeout=60
+          )
+
+
+          print(
+              f"Callback HTTP status: "
+              f"{response.status_code}"
+          )
+
+          print(response.text)
+
+          PY
+
+        env:
+          VIDEO_ID: ${{ steps.upload.outputs.video_id }}
+          VIDEO_TITLE: ${{ inputs.title }}
+          PLAYLIST_NAME: ${{ inputs.playlist_name }}
